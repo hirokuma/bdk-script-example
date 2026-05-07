@@ -1,23 +1,21 @@
 use bdk_electrum::{BdkElectrumClient, electrum_client, electrum_client::Client};
 use bdk_wallet::{
     AddressInfo, KeychainKind, Wallet,
-    bitcoin::Network,
-    chain::spk_client::{SyncRequest, SyncRequestBuilder},
+    bitcoin::{Network, NetworkKind, bip32::Xpriv, key::rand::{self, RngCore}},
+    chain::spk_client::{SyncRequest, SyncRequestBuilder}, template::{Bip86, DescriptorTemplate},
 };
 
 const ELECTRUM_SERVER: &str = "tcp://localhost:50001";
 const STOP_GAP: usize = 50;
 const BATCH_SIZE: usize = 5;
-const EXTERNAL_DESCRIPTOR: &str = "tr(tprv8ZgxMBicQKsPdrjwWCyXqqJ4YqcyG4DmKtjjsRt29v1PtD3r3PuFJAjWytzcvSTKnZAGAkPSmnrdnuHWxCAwy3i1iPhrtKAfXRH7dVCNGp6/86'/1'/0'/0/*)#g9xn7wf9";
-const INTERNAL_DESCRIPTOR: &str = "tr(tprv8ZgxMBicQKsPdrjwWCyXqqJ4YqcyG4DmKtjjsRt29v1PtD3r3PuFJAjWytzcvSTKnZAGAkPSmnrdnuHWxCAwy3i1iPhrtKAfXRH7dVCNGp6/86'/1'/0'/1/*)#e3rjrmea";
 
 fn main() {
     use std::io::{self, Write};
 
     loop {
         println!("\n====== メニュー ======");
-        println!("1. create_wallet()を実行");
-        println!("2. hello()を実行");
+        println!("1. create_seed()を実行");
+        println!("2. seedからcreate_wallet()を実行");
         println!("3. 終了");
         println!("====================");
         print!("選択を入力してください (1-3): ");
@@ -28,8 +26,19 @@ fn main() {
         let choice = input.trim();
 
         match choice {
-            "1" => create_wallet(),
-            "2" => hello(),
+            "1" => create_seed(),
+            "2" => {
+                print!("seedを入力してください: ");
+                io::stdout().flush().unwrap();
+
+                let mut seed = String::new();
+                io::stdin()
+                    .read_line(&mut seed)
+                    .expect("seedの読み込みに失敗しました");
+                let seed = seed.trim();
+
+                create_wallet(seed);
+            }
             "3" => {
                 println!("終了します。");
                 break;
@@ -39,8 +48,41 @@ fn main() {
     }
 }
 
-fn create_wallet() {
-    let mut wallet: Wallet = Wallet::create(EXTERNAL_DESCRIPTOR, INTERNAL_DESCRIPTOR)
+fn create_seed() {
+    let mut seed: [u8; 32] = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let seed_hex = hex::encode(seed);
+    println!("seed: {}", seed_hex);
+}
+
+// https://bitcoindevkit.github.io/book-of-bdk/cookbook/keys-descriptors/descriptors/#using-descriptor-templates
+fn create_priv(seed_hex: &str) -> (String, String) {
+    let mut seed: [u8; 32] = [0u8; 32];
+    hex::decode_to_slice(seed_hex, &mut seed).expect("Invalid seed hex");
+
+    let network: Network = Network::Signet;
+    let kind = if network == Network::Bitcoin {
+        NetworkKind::Main
+    } else {
+        NetworkKind::Test
+    };
+    let xprv: Xpriv = Xpriv::new_master(network, &seed).unwrap();
+    let (descriptor, key_map, _) = Bip86(xprv, KeychainKind::External)
+        .build(kind)
+        .expect("Failed to build external descriptor");
+
+    let (change_descriptor, change_key_map, _) = Bip86(xprv, KeychainKind::Internal)
+        .build(kind)
+        .expect("Failed to build internal descriptor");
+
+    let descriptor_string_priv = descriptor.to_string_with_secret(&key_map);
+    let change_descriptor_string_priv = change_descriptor.to_string_with_secret(&change_key_map);
+    (descriptor_string_priv, change_descriptor_string_priv)
+}
+
+fn create_wallet(seed_hex: &str) {
+    let (external_descriptor, internal_descriptor) = create_priv(seed_hex);
+    let mut wallet: Wallet = Wallet::create(external_descriptor, internal_descriptor)
         .network(Network::Regtest)
         .create_wallet_no_persist()
         .expect("Failed to create wallet");
@@ -113,8 +155,4 @@ fn sync_request(wallet: &Wallet) -> SyncRequestBuilder<(bdk_wallet::KeychainKind
     SyncRequest::builder()
         .chain_tip(chain_tip)
         .spks_with_indexes(spks_to_sync)
-}
-
-fn hello() {
-    println!("Hello, world!");
 }
