@@ -26,7 +26,10 @@ fn main() {
         let choice = input.trim();
 
         match choice {
-            "1" => create_seed(),
+            "1" => {
+                let seed_hex = create_seed();
+                println!("Generated seed: {}", seed_hex);
+            }
             "2" => {
                 print!("seedを入力してください: ");
                 io::stdout().flush().unwrap();
@@ -37,7 +40,11 @@ fn main() {
                     .expect("seedの読み込みに失敗しました");
                 let seed = seed.trim();
 
-                create_wallet(seed);
+                let mut wallet = create_wallet(seed);
+                full_scan(&mut wallet);
+                let address = get_new_address(&mut wallet);
+                println!("Generated address: {}", address);
+                watch_wallet(&mut wallet);
             }
             "3" => {
                 println!("終了します。");
@@ -48,11 +55,10 @@ fn main() {
     }
 }
 
-fn create_seed() {
+fn create_seed() -> String{
     let mut seed: [u8; 32] = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
-    let seed_hex = hex::encode(seed);
-    println!("seed: {}", seed_hex);
+    hex::encode(seed)
 }
 
 // https://bitcoindevkit.github.io/book-of-bdk/cookbook/keys-descriptors/descriptors/#using-descriptor-templates
@@ -80,20 +86,20 @@ fn create_priv(seed_hex: &str) -> (String, String) {
     (descriptor_string_priv, change_descriptor_string_priv)
 }
 
-fn create_wallet(seed_hex: &str) {
+fn create_wallet(seed_hex: &str) -> Wallet {
     let (external_descriptor, internal_descriptor) = create_priv(seed_hex);
-    let mut wallet: Wallet = Wallet::create(external_descriptor, internal_descriptor)
+    Wallet::create(external_descriptor, internal_descriptor)
         .network(Network::Regtest)
         .create_wallet_no_persist()
-        .expect("Failed to create wallet");
+        .expect("Failed to create wallet")
+}
 
+fn get_new_address(wallet: &mut Wallet) -> String{
     let address: AddressInfo = wallet.reveal_next_address(KeychainKind::External);
-    println!(
-        "Generated address {} at index {}",
-        address.address, address.index
-    );
+    address.address.to_string()
+}
 
-    // Create the Electrum client
+fn full_scan(wallet: &mut Wallet) {
     let client: BdkElectrumClient<Client> = BdkElectrumClient::new(
         electrum_client::Client::new(ELECTRUM_SERVER).expect("Failed to create Electrum client"),
     );
@@ -101,14 +107,21 @@ fn create_wallet(seed_hex: &str) {
     // Perform the initial full scan on the wallet
     println!("full_scanning...");
     let start = std::time::Instant::now();
+
     let full_scan_request = wallet.start_full_scan();
     let update = client
         .full_scan(full_scan_request, STOP_GAP, BATCH_SIZE, true)
         .expect("Failed to perform full scan");
-
     wallet.apply_update(update).expect("Failed to apply update");
+
     let duration = start.elapsed();
     println!("full_scan elapsed: {:?}", duration);
+}
+
+fn watch_wallet(wallet: &mut Wallet) {
+    let client: BdkElectrumClient<Client> = BdkElectrumClient::new(
+        electrum_client::Client::new(ELECTRUM_SERVER).expect("Failed to create Electrum client"),
+    );
 
     loop {
         std::thread::sleep(std::time::Duration::from_secs(10));
