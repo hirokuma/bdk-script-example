@@ -12,6 +12,34 @@ const EXTERNAL_DESCRIPTOR: &str = "tr(tprv8ZgxMBicQKsPdrjwWCyXqqJ4YqcyG4DmKtjjsR
 const INTERNAL_DESCRIPTOR: &str = "tr(tprv8ZgxMBicQKsPdrjwWCyXqqJ4YqcyG4DmKtjjsRt29v1PtD3r3PuFJAjWytzcvSTKnZAGAkPSmnrdnuHWxCAwy3i1iPhrtKAfXRH7dVCNGp6/86'/1'/0'/1/*)#e3rjrmea";
 
 fn main() {
+    use std::io::{self, Write};
+
+    loop {
+        println!("\n====== メニュー ======");
+        println!("1. create_wallet()を実行");
+        println!("2. hello()を実行");
+        println!("3. 終了");
+        println!("====================");
+        print!("選択を入力してください (1-3): ");
+        io::stdout().flush().unwrap();
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).expect("入力の読み込みに失敗しました");
+        let choice = input.trim();
+
+        match choice {
+            "1" => create_wallet(),
+            "2" => hello(),
+            "3" => {
+                println!("終了します。");
+                break;
+            }
+            _ => println!("無効な入力です。1、2、または3を入力してください。"),
+        }
+    }
+}
+
+fn create_wallet() {
     let mut wallet: Wallet = Wallet::create(EXTERNAL_DESCRIPTOR, INTERNAL_DESCRIPTOR)
         .network(Network::Regtest)
         .create_wallet_no_persist()
@@ -85,4 +113,8 @@ fn sync_request(wallet: &Wallet) -> SyncRequestBuilder<(bdk_wallet::KeychainKind
     SyncRequest::builder()
         .chain_tip(chain_tip)
         .spks_with_indexes(spks_to_sync)
+}
+
+fn hello() {
+    println!("Hello, world!");
 }
