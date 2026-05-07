@@ -67,11 +67,7 @@ fn create_priv(seed_hex: &str) -> (String, String) {
     hex::decode_to_slice(seed_hex, &mut seed).expect("Invalid seed hex");
 
     let network: Network = Network::Signet;
-    let kind = if network == Network::Bitcoin {
-        NetworkKind::Main
-    } else {
-        NetworkKind::Test
-    };
+    let kind = NetworkKind::from(network);
     let xprv: Xpriv = Xpriv::new_master(network, &seed).unwrap();
     let (descriptor, key_map, _) = Bip86(xprv, KeychainKind::External)
         .build(kind)
