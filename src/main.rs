@@ -2,57 +2,42 @@ use bdk_electrum::{BdkElectrumClient, electrum_client, electrum_client::Client};
 use bdk_wallet::{
     AddressInfo, KeychainKind, Wallet,
     bitcoin::{Network, NetworkKind, bip32::Xpriv, key::rand::{self, RngCore}},
-    chain::spk_client::{SyncRequest, SyncRequestBuilder}, template::{Bip86, DescriptorTemplate},
+    chain::spk_client::{SyncRequest, SyncRequestBuilder}, descriptor,
+    template::{Bip86, DescriptorTemplate},
 };
 
 const ELECTRUM_SERVER: &str = "tcp://localhost:50001";
 const STOP_GAP: usize = 50;
 const BATCH_SIZE: usize = 5;
 
+// pick as internal key a "Nothing Up My Sleeve" (NUMS) point
+// TODO H + rG
+// https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki#constructing-and-spending-taproot-outputs
+const NUMS_XPUBKEY: &str = "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
+
 fn main() {
-    use std::io::{self, Write};
+    let wallet1 = create_wallet(create_seed().as_str());
+    let xpub1 = wallet1.public_descriptor(KeychainKind::External).to_string();
+    let wallet2 = create_wallet(create_seed().as_str());
+    let xpub2 = wallet2.public_descriptor(KeychainKind::External).to_string();
+    println!("Wallet 1 xpub: {}", xpub1);
+    println!("Wallet 2 xpub: {}", xpub2);
 
-    loop {
-        println!("\n====== メニュー ======");
-        println!("1. create_seed()を実行");
-        println!("2. seedからcreate_wallet()を実行");
-        println!("3. 終了");
-        println!("====================");
-        print!("選択を入力してください (1-3): ");
-        io::stdout().flush().unwrap();
+    let (descriptor, _, _) = descriptor! {
+        tr(NUMS_XPUBKEY, multi(2, xpub1, xpub2))
+    }.inspect_err(|e| eprintln!("Descriptor error: {}", e)).unwrap();
+    println!("Descriptor: {}", descriptor.to_string());
+    let mut wallet = Wallet::create(descriptor.clone(), descriptor)
+        .network(Network::Regtest)
+        .create_wallet_no_persist()
+        .expect("Failed to create wallet");
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).expect("入力の読み込みに失敗しました");
-        let choice = input.trim();
 
-        match choice {
-            "1" => {
-                let seed_hex = create_seed();
-                println!("Generated seed: {}", seed_hex);
-            }
-            "2" => {
-                print!("seedを入力してください: ");
-                io::stdout().flush().unwrap();
+    full_scan(&mut wallet);
 
-                let mut seed = String::new();
-                io::stdin()
-                    .read_line(&mut seed)
-                    .expect("seedの読み込みに失敗しました");
-                let seed = seed.trim();
-
-                let mut wallet = create_wallet(seed);
-                full_scan(&mut wallet);
-                let address = get_new_address(&mut wallet);
-                println!("Generated address: {}", address);
-                watch_wallet(&mut wallet);
-            }
-            "3" => {
-                println!("終了します。");
-                break;
-            }
-            _ => println!("無効な入力です。1、2、または3を入力してください。"),
-        }
-    }
+    let address = get_new_address(&mut wallet);
+    println!("Generated address: {}", address);
+    watch_wallet(&mut wallet);
 }
 
 fn create_seed() -> String{
