@@ -1,11 +1,12 @@
-use std::str::FromStr;
+use std::{collections::BTreeMap, str::FromStr};
 
 use bdk_electrum::{BdkElectrumClient, electrum_client, electrum_client::Client};
 use bdk_wallet::{
-    AddressInfo, KeychainKind, Wallet,
+    AddressInfo, Balance, KeychainKind, Wallet,
     bitcoin::{
-        Network, NetworkKind,
+        Address, Amount, Network, NetworkKind, Psbt,
         bip32::Xpriv,
+        consensus::encode,
         key::rand::{self, RngCore},
     },
     chain::spk_client::{SyncRequest, SyncRequestBuilder},
@@ -18,6 +19,7 @@ const ELECTRUM_SERVER: &str = "tcp://localhost:50001";
 const STOP_GAP: usize = 50;
 const BATCH_SIZE: usize = 5;
 const NETWORK: Network = Network::Regtest;
+const WATCH_DURATION_SECS: u64 = 1;
 
 // pick as internal key a "Nothing Up My Sleeve" (NUMS) point
 // TODO H + rG
@@ -25,30 +27,43 @@ const NETWORK: Network = Network::Regtest;
 const NUMS_XPUBKEY: &str = "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
 
 fn main() -> anyhow::Result<()> {
-    let wallet1 = create_wallet(create_seed().as_str());
-    let xpub1  = wallet1.public_descriptor(KeychainKind::External);
+    let mut wallet1 = create_wallet(create_seed().as_str());
+    let xpub1 = wallet1.public_descriptor(KeychainKind::External);
     let xpub1i = wallet1.public_descriptor(KeychainKind::Internal);
-    let wallet2 = create_wallet(create_seed().as_str());
+    let mut wallet2 = create_wallet(create_seed().as_str());
     let xpub2 = wallet2.public_descriptor(KeychainKind::External);
     let xpub2i = wallet2.public_descriptor(KeychainKind::Internal);
 
     let descriptor = create_multisig_descriptor(&xpub1, &xpub2);
     let descriptor_i = create_multisig_descriptor(&xpub1i, &xpub2i);
-    println!("Descriptor: {}", descriptor.to_string());
 
     // create watch only wallet with the multisig descriptor
-    let mut wallet = Wallet::create(descriptor, descriptor_i)
+    let mut multi_wallet = Wallet::create(descriptor, descriptor_i)
         .network(NETWORK)
         .create_wallet_no_persist()
         .expect("Failed to create wallet");
 
-    full_scan(&mut wallet);
+    full_scan(&mut multi_wallet);
 
-    let address = get_new_address(&mut wallet);
-    println!("Generated address: {}", address);
-    watch_wallet(&mut wallet);
+    loop {
+        let address = get_new_address(&mut multi_wallet);
+        println!("Generated address: {}", address);
+        let balance = watch_wallet(&mut multi_wallet);
 
-    Ok(())
+        let address = get_new_address(&mut multi_wallet);
+        let send_sat = balance.total().to_sat() / 2;
+        println!("Send to address(amount={} sat): {}", send_sat, address);
+        send_to_address(
+            &mut multi_wallet,
+            &mut wallet1,
+            &mut wallet2,
+            &address,
+            send_sat,
+        );
+        let _ = watch_wallet(&mut multi_wallet);
+
+        println!("------------------------------");
+    }
 }
 
 fn create_seed() -> String {
@@ -81,7 +96,10 @@ fn create_wallet(seed_hex: &str) -> Wallet {
         .expect("Failed to create wallet")
 }
 
-fn create_multisig_descriptor(xpub1: &descriptor::Descriptor<DescriptorPublicKey>, xpub2: &descriptor::Descriptor<DescriptorPublicKey>) -> descriptor::Descriptor<DescriptorPublicKey> {
+fn create_multisig_descriptor(
+    xpub1: &descriptor::Descriptor<DescriptorPublicKey>,
+    xpub2: &descriptor::Descriptor<DescriptorPublicKey>,
+) -> descriptor::Descriptor<DescriptorPublicKey> {
     let key1_ext = convert_descriptor(xpub1).expect("Failed to extract xpub from wallet 1");
     let key2_ext = convert_descriptor(xpub2).expect("Failed to extract xpub from wallet 2");
     let intr_ext = DescriptorPublicKey::from_str(NUMS_XPUBKEY)
@@ -95,7 +113,9 @@ fn create_multisig_descriptor(xpub1: &descriptor::Descriptor<DescriptorPublicKey
     descriptor
 }
 
-fn convert_descriptor(xpub: &descriptor::Descriptor<DescriptorPublicKey>) -> Option<DescriptorPublicKey> {
+fn convert_descriptor(
+    xpub: &descriptor::Descriptor<DescriptorPublicKey>,
+) -> Option<DescriptorPublicKey> {
     let mut key_ext = None;
     xpub.for_each_key(|key| {
         key_ext = Some(key.clone());
@@ -114,29 +134,23 @@ fn full_scan(wallet: &mut Wallet) {
         electrum_client::Client::new(ELECTRUM_SERVER).expect("Failed to create Electrum client"),
     );
 
-    // Perform the initial full scan on the wallet
-    println!("full_scanning...");
-    let start = std::time::Instant::now();
-
     let full_scan_request = wallet.start_full_scan();
     let update = client
         .full_scan(full_scan_request, STOP_GAP, BATCH_SIZE, true)
         .expect("Failed to perform full scan");
     wallet.apply_update(update).expect("Failed to apply update");
-
-    let duration = start.elapsed();
-    println!("full_scan elapsed: {:?}", duration);
 }
 
-fn watch_wallet(wallet: &mut Wallet) {
+fn watch_wallet(wallet: &mut Wallet) -> Balance {
     let client: BdkElectrumClient<Client> = BdkElectrumClient::new(
         electrum_client::Client::new(ELECTRUM_SERVER).expect("Failed to create Electrum client"),
     );
 
+    let mut balance = wallet.balance();
+    println!("Initial wallet balance: {} sat", balance.total().to_sat());
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(10));
+        std::thread::sleep(std::time::Duration::from_secs(WATCH_DURATION_SECS));
 
-        let start = std::time::Instant::now();
         let sync_request = sync_request(&wallet);
         let sync_response = client
             .sync(sync_request, BATCH_SIZE, false)
@@ -144,12 +158,15 @@ fn watch_wallet(wallet: &mut Wallet) {
         wallet
             .apply_update(sync_response)
             .expect("Failed to apply update");
-        let duration = start.elapsed();
-        println!("sync elapsed: {:?}", duration);
 
-        let balance = wallet.balance();
-        println!("Wallet balance: {} sat\n", balance.total().to_sat());
+        let new_balance = wallet.balance();
+        if new_balance.total() != balance.total() {
+            println!("Wallet balance: {} sat", new_balance.total().to_sat());
+            balance = new_balance;
+            break;
+        }
     }
+    balance
 }
 
 fn sync_request(wallet: &Wallet) -> SyncRequestBuilder<(bdk_wallet::KeychainKind, u32)> {
@@ -178,4 +195,78 @@ fn sync_request(wallet: &Wallet) -> SyncRequestBuilder<(bdk_wallet::KeychainKind
     SyncRequest::builder()
         .chain_tip(chain_tip)
         .spks_with_indexes(spks_to_sync)
+}
+
+fn send_to_address(
+    multi_wallet: &mut Wallet,
+    wallet1: &mut Wallet,
+    wallet2: &mut Wallet,
+    address: &str,
+    amount_sat: u64,
+) {
+    let mut psbt = create_psbt(multi_wallet, address, amount_sat).expect("Failed to create PSBT");
+
+    let _ = wallet1
+        .sign(
+            &mut psbt,
+            bdk_wallet::SignOptions {
+                trust_witness_utxo: true,
+                try_finalize: false,
+                ..Default::default()
+            },
+        )
+        .expect("Failed to sign PSBT with wallet 1");
+    let _ = wallet2
+        .sign(
+            &mut psbt,
+            bdk_wallet::SignOptions {
+                trust_witness_utxo: true,
+                try_finalize: false,
+                ..Default::default()
+            },
+        )
+        .expect("Failed to sign PSBT with wallet 2");
+    let finalized = multi_wallet
+        .finalize_psbt(
+            &mut psbt,
+            bdk_wallet::SignOptions {
+                trust_witness_utxo: true,
+                try_finalize: true,
+                ..Default::default()
+            },
+        )
+        .expect("Failed to finalize PSBT");
+    if !finalized {
+        eprintln!("Failed to finalize PSBT");
+        return;
+    }
+    let tx = psbt
+        .extract_tx()
+        .expect("Failed to extract transaction from PSBT");
+    println!("Final transaction: {}", encode::serialize_hex(&tx));
+}
+
+fn create_psbt(wallet: &mut Wallet, address: &str, amount_sat: u64) -> anyhow::Result<Psbt> {
+    let wallet_policy = wallet.policies(KeychainKind::External)?;
+    let wallet_policy = match wallet_policy {
+        Some(v) => v,
+        None => {
+            let msg = "no wallet policy";
+            eprintln!("{msg}");
+            anyhow::bail!(msg)
+        }
+    };
+
+    let mut builder = wallet.build_tx();
+    builder.only_witness_utxo();
+
+    let address = Address::from_str(address)?.require_network(NETWORK)?;
+    builder.add_recipient(address.script_pubkey(), Amount::from_sat(amount_sat));
+
+    let mut path = BTreeMap::new();
+    path.insert(wallet_policy.id, vec![1]);
+    builder.policy_path(path.clone(), KeychainKind::External);
+    builder.policy_path(path, KeychainKind::Internal);
+
+    Ok(builder.finish()?)
 }
