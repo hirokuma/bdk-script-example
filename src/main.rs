@@ -17,6 +17,7 @@ use bdk_wallet::{
 const ELECTRUM_SERVER: &str = "tcp://localhost:50001";
 const STOP_GAP: usize = 50;
 const BATCH_SIZE: usize = 5;
+const NETWORK: Network = Network::Regtest;
 
 // pick as internal key a "Nothing Up My Sleeve" (NUMS) point
 // TODO H + rG
@@ -37,7 +38,7 @@ fn main() -> anyhow::Result<()> {
 
     // create watch only wallet with the multisig descriptor
     let mut wallet = Wallet::create(descriptor, descriptor_i)
-        .network(Network::Regtest)
+        .network(NETWORK)
         .create_wallet_no_persist()
         .expect("Failed to create wallet");
 
@@ -54,6 +55,30 @@ fn create_seed() -> String {
     let mut seed: [u8; 32] = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
     hex::encode(seed)
+}
+
+// https://bitcoindevkit.github.io/book-of-bdk/cookbook/keys-descriptors/descriptors/#using-descriptor-templates
+fn create_wallet(seed_hex: &str) -> Wallet {
+    let mut seed: [u8; 32] = [0u8; 32];
+    hex::decode_to_slice(seed_hex, &mut seed).expect("Invalid seed hex");
+
+    let network: Network = Network::Signet;
+    let kind = NetworkKind::from(network);
+    let xprv: Xpriv = Xpriv::new_master(network, &seed).unwrap();
+    let (descriptor, key_map, _) = Bip86(xprv, KeychainKind::External)
+        .build(kind)
+        .expect("Failed to build external descriptor");
+
+    let (change_descriptor, change_key_map, _) = Bip86(xprv, KeychainKind::Internal)
+        .build(kind)
+        .expect("Failed to build internal descriptor");
+
+    let external_descriptor_priv = descriptor.to_string_with_secret(&key_map);
+    let internal_descriptor_priv = change_descriptor.to_string_with_secret(&change_key_map);
+    Wallet::create(external_descriptor_priv, internal_descriptor_priv)
+        .network(NETWORK)
+        .create_wallet_no_persist()
+        .expect("Failed to create wallet")
 }
 
 fn create_multisig_descriptor(xpub1: &descriptor::Descriptor<DescriptorPublicKey>, xpub2: &descriptor::Descriptor<DescriptorPublicKey>) -> descriptor::Descriptor<DescriptorPublicKey> {
@@ -77,35 +102,6 @@ fn convert_descriptor(xpub: &descriptor::Descriptor<DescriptorPublicKey>) -> Opt
         false
     });
     key_ext
-}
-
-// https://bitcoindevkit.github.io/book-of-bdk/cookbook/keys-descriptors/descriptors/#using-descriptor-templates
-fn create_priv(seed_hex: &str) -> (String, String) {
-    let mut seed: [u8; 32] = [0u8; 32];
-    hex::decode_to_slice(seed_hex, &mut seed).expect("Invalid seed hex");
-
-    let network: Network = Network::Signet;
-    let kind = NetworkKind::from(network);
-    let xprv: Xpriv = Xpriv::new_master(network, &seed).unwrap();
-    let (descriptor, key_map, _) = Bip86(xprv, KeychainKind::External)
-        .build(kind)
-        .expect("Failed to build external descriptor");
-
-    let (change_descriptor, change_key_map, _) = Bip86(xprv, KeychainKind::Internal)
-        .build(kind)
-        .expect("Failed to build internal descriptor");
-
-    let descriptor_string_priv = descriptor.to_string_with_secret(&key_map);
-    let change_descriptor_string_priv = change_descriptor.to_string_with_secret(&change_key_map);
-    (descriptor_string_priv, change_descriptor_string_priv)
-}
-
-fn create_wallet(seed_hex: &str) -> Wallet {
-    let (external_descriptor, internal_descriptor) = create_priv(seed_hex);
-    Wallet::create(external_descriptor, internal_descriptor)
-        .network(Network::Regtest)
-        .create_wallet_no_persist()
-        .expect("Failed to create wallet")
 }
 
 fn get_new_address(wallet: &mut Wallet) -> String {
