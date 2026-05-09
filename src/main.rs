@@ -1,8 +1,16 @@
+use std::str::FromStr;
+
 use bdk_electrum::{BdkElectrumClient, electrum_client, electrum_client::Client};
 use bdk_wallet::{
     AddressInfo, KeychainKind, Wallet,
-    bitcoin::{Network, NetworkKind, bip32::Xpriv, key::rand::{self, RngCore}},
-    chain::spk_client::{SyncRequest, SyncRequestBuilder}, descriptor,
+    bitcoin::{
+        Network, NetworkKind,
+        bip32::Xpriv,
+        key::rand::{self, RngCore},
+    },
+    chain::spk_client::{SyncRequest, SyncRequestBuilder},
+    descriptor,
+    miniscript::{DescriptorPublicKey, ForEachKey},
     template::{Bip86, DescriptorTemplate},
 };
 
@@ -15,35 +23,60 @@ const BATCH_SIZE: usize = 5;
 // https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki#constructing-and-spending-taproot-outputs
 const NUMS_XPUBKEY: &str = "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0";
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let wallet1 = create_wallet(create_seed().as_str());
-    let xpub1 = wallet1.public_descriptor(KeychainKind::External).to_string();
+    let xpub1  = wallet1.public_descriptor(KeychainKind::External);
+    let xpub1i = wallet1.public_descriptor(KeychainKind::Internal);
     let wallet2 = create_wallet(create_seed().as_str());
-    let xpub2 = wallet2.public_descriptor(KeychainKind::External).to_string();
-    println!("Wallet 1 xpub: {}", xpub1);
-    println!("Wallet 2 xpub: {}", xpub2);
+    let xpub2 = wallet2.public_descriptor(KeychainKind::External);
+    let xpub2i = wallet2.public_descriptor(KeychainKind::Internal);
 
-    let (descriptor, _, _) = descriptor! {
-        tr(NUMS_XPUBKEY, multi(2, xpub1, xpub2))
-    }.inspect_err(|e| eprintln!("Descriptor error: {}", e)).unwrap();
+    let descriptor = create_multisig_descriptor(&xpub1, &xpub2);
+    let descriptor_i = create_multisig_descriptor(&xpub1i, &xpub2i);
     println!("Descriptor: {}", descriptor.to_string());
-    let mut wallet = Wallet::create(descriptor.clone(), descriptor)
+
+    // create watch only wallet with the multisig descriptor
+    let mut wallet = Wallet::create(descriptor, descriptor_i)
         .network(Network::Regtest)
         .create_wallet_no_persist()
         .expect("Failed to create wallet");
-
 
     full_scan(&mut wallet);
 
     let address = get_new_address(&mut wallet);
     println!("Generated address: {}", address);
     watch_wallet(&mut wallet);
+
+    Ok(())
 }
 
-fn create_seed() -> String{
+fn create_seed() -> String {
     let mut seed: [u8; 32] = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut seed);
     hex::encode(seed)
+}
+
+fn create_multisig_descriptor(xpub1: &descriptor::Descriptor<DescriptorPublicKey>, xpub2: &descriptor::Descriptor<DescriptorPublicKey>) -> descriptor::Descriptor<DescriptorPublicKey> {
+    let key1_ext = convert_descriptor(xpub1).expect("Failed to extract xpub from wallet 1");
+    let key2_ext = convert_descriptor(xpub2).expect("Failed to extract xpub from wallet 2");
+    let intr_ext = DescriptorPublicKey::from_str(NUMS_XPUBKEY)
+        .inspect_err(|e| eprintln!("Internal key error: {}", e))
+        .unwrap();
+    let (descriptor, _, _) = descriptor! {
+        tr(intr_ext, multi_a(2, key1_ext, key2_ext))
+    }
+    .inspect_err(|e| eprintln!("Descriptor error: {}", e))
+    .unwrap();
+    descriptor
+}
+
+fn convert_descriptor(xpub: &descriptor::Descriptor<DescriptorPublicKey>) -> Option<DescriptorPublicKey> {
+    let mut key_ext = None;
+    xpub.for_each_key(|key| {
+        key_ext = Some(key.clone());
+        false
+    });
+    key_ext
 }
 
 // https://bitcoindevkit.github.io/book-of-bdk/cookbook/keys-descriptors/descriptors/#using-descriptor-templates
@@ -75,7 +108,7 @@ fn create_wallet(seed_hex: &str) -> Wallet {
         .expect("Failed to create wallet")
 }
 
-fn get_new_address(wallet: &mut Wallet) -> String{
+fn get_new_address(wallet: &mut Wallet) -> String {
     let address: AddressInfo = wallet.reveal_next_address(KeychainKind::External);
     address.address.to_string()
 }
